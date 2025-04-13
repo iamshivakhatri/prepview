@@ -7,6 +7,25 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+const googleResponse = async (question: string, resume: string, jobDescription: string, userName: string, history: any) =>{ 
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:002?key=${process.env.GOOGLE_API_KEY}`, {
+    method: "POST",
+    body: JSON.stringify({
+      prompt: question,
+      resume: resume,
+      jobDescription: jobDescription,
+      userName: userName,
+      history: history,
+    }),
+
+  });
+
+  const data = await response.json();
+  return data.candidates[0].content;
+}
+
+
+
 export async function POST(request: NextRequest) {
   try {
     // Check if the API key is configured
