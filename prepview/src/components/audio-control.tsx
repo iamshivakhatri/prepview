@@ -5,6 +5,9 @@ import { Mic, Square, Headphones } from "lucide-react";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { AIProvider, DEFAULT_PROVIDER } from "@/lib/ai-config";
+import { browserSupportsAudio, safeGetUserMedia } from "@/lib/utils";
+import { FallbackInput } from "@/components/fallback-input";
 
 // Define types for the props and results from react-media-recorder
 // without directly importing it (to avoid SSR issues)
@@ -35,6 +38,7 @@ interface AudioControlProps {
   onTranscriptionComplete: (text: string) => void;
   isProcessing: boolean;
   autoMode: boolean;
+  aiProvider?: AIProvider;
 }
 
 // Sound wave visualizer component
@@ -63,6 +67,7 @@ export function AudioControl({
   onTranscriptionComplete,
   isProcessing,
   autoMode,
+  aiProvider = DEFAULT_PROVIDER,
 }: AudioControlProps) {
   // All state declarations at the top level
   const [isTranscribing, setIsTranscribing] = useState(false);
@@ -70,6 +75,7 @@ export function AudioControl({
   const [silenceTimer, setSilenceTimer] = useState<NodeJS.Timeout | null>(null);
   const [audioChunks, setAudioChunks] = useState<Blob[]>([]);
   const [isBrowser, setIsBrowser] = useState(false);
+  const [browserSupport, setBrowserSupport] = useState(false);
   const [manualStatus, setManualStatus] = useState<"idle" | "recording" | "processing">("idle");
   const [manualRecorder, setManualRecorder] = useState<MediaRecorder | null>(null);
   const [manualChunks, setManualChunks] = useState<Blob[]>([]);
@@ -82,6 +88,7 @@ export function AudioControl({
   // Check if we're in the browser on component mount
   useEffect(() => {
     setIsBrowser(typeof window !== "undefined");
+    setBrowserSupport(browserSupportsAudio());
     
     // Clean up function
     return () => {
@@ -119,8 +126,11 @@ export function AudioControl({
       const formData = new FormData();
       formData.append("audio", audioBlob);
       
+      // Determine which endpoint to use based on the aiProvider
+      const endpoint = aiProvider === 'google' ? "/api/transcribe-google" : "/api/transcribe";
+      
       // Send to our transcription API
-      const response = await fetch("/api/transcribe", {
+      const response = await fetch(endpoint, {
         method: "POST",
         body: JSON.stringify({ audio: base64Audio }),
         headers: {
@@ -129,7 +139,7 @@ export function AudioControl({
       });
       
       if (!response.ok) {
-        throw new Error("Failed to transcribe audio");
+        throw new Error(`Failed to transcribe audio using ${aiProvider}`);
       }
       
       const data = await response.json();
@@ -145,32 +155,59 @@ export function AudioControl({
     } finally {
       setIsTranscribing(false);
     }
-  }, [isBrowser, onTranscriptionComplete, blobToBase64]);
+  }, [isBrowser, onTranscriptionComplete, blobToBase64, aiProvider]);
   
   // Start auto listening mode
-  const startAutoListening = useCallback(() => {
+  const startAutoListening = useCallback(async () => {
     if (!isBrowser) return;
     
     setIsListening(true);
     setAudioChunks([]);
     
-    navigator.mediaDevices.getUserMedia({ audio: true })
-      .then((stream) => {
-        // Create audio context and analyzer
-        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const analyser = audioContext.createAnalyser();
-        const microphone = audioContext.createMediaStreamSource(stream);
-        
-        microphone.connect(analyser);
-        analyser.fftSize = 256;
-        
-        const bufferLength = analyser.frequencyBinCount;
-        const dataArray = new Uint8Array(bufferLength);
-        
-        audioContextRef.current = audioContext;
-        analyserRef.current = analyser;
-        
-        // Create media recorder
+    if (!browserSupport) {
+      toast.error("Audio recording is not supported in this browser. Please try Chrome, Firefox, or Edge.");
+      setIsListening(false);
+      return;
+    }
+    
+    try {
+      const stream = await safeGetUserMedia({ audio: true });
+      
+      // Try to create audio context
+      let audioContext: AudioContext | null = null;
+      try {
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioContextClass) {
+          audioContext = new AudioContextClass();
+        }
+      } catch (err) {
+        console.warn("AudioContext not available:", err);
+      }
+      
+      // Set up analyzer if audio context is available
+      if (audioContext) {
+        try {
+          const analyser = audioContext.createAnalyser();
+          const microphone = audioContext.createMediaStreamSource(stream);
+          
+          microphone.connect(analyser);
+          analyser.fftSize = 256;
+          
+          audioContextRef.current = audioContext;
+          analyserRef.current = analyser;
+        } catch (err) {
+          console.warn("Failed to set up audio analyzer:", err);
+          // Continue without analyzer - we'll just use timeouts instead
+          if (audioContext) {
+            try {
+              await audioContext.close();
+            } catch {}
+          }
+        }
+      }
+      
+      // Create media recorder
+      try {
         const mediaRecorder = new MediaRecorder(stream);
         mediaRecorderRef.current = mediaRecorder;
         
@@ -182,60 +219,91 @@ export function AudioControl({
         
         mediaRecorder.start(500);
         
-        // Monitor sound levels to detect when to process audio
-        const checkSoundLevel = () => {
-          if (!isListening || !analyser) return;
+        // If we have an analyzer, use it to detect silence
+        if (analyserRef.current) {
+          const bufferLength = analyserRef.current.frequencyBinCount;
+          const dataArray = new Uint8Array(bufferLength);
           
-          analyser.getByteFrequencyData(dataArray);
-          
-          // Calculate average volume level
-          let sum = 0;
-          for (let i = 0; i < bufferLength; i++) {
-            sum += dataArray[i];
-          }
-          const average = sum / bufferLength;
-          
-          // If sound detected above threshold
-          if (average > 20) {
-            // Reset silence timer if already set
-            if (silenceTimer) {
-              clearTimeout(silenceTimer);
-              setSilenceTimer(null);
-            }
-          } else if (!silenceTimer && audioChunks.length > 0) {
-            // If silence detected and timer not already set
-            const timer = setTimeout(() => {
-              // Process audio after silence
-              if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-                mediaRecorderRef.current.stop();
-                setTimeout(() => {
-                  processAudio(audioChunks);
-                  setAudioChunks([]);
-                  
-                  // Restart recording
-                  if (isListening && mediaRecorderRef.current) {
-                    mediaRecorderRef.current.start(500);
-                  }
-                }, 500);
-              }
-            }, 1500); // 1.5 seconds of silence before processing
+          const checkSoundLevel = () => {
+            if (!isListening || !analyserRef.current) return;
             
-            setSilenceTimer(timer);
-          }
+            analyserRef.current.getByteFrequencyData(dataArray);
+            
+            // Calculate average volume level
+            let sum = 0;
+            for (let i = 0; i < bufferLength; i++) {
+              sum += dataArray[i];
+            }
+            const average = sum / bufferLength;
+            
+            // If sound detected above threshold
+            if (average > 20) {
+              // Reset silence timer if already set
+              if (silenceTimer) {
+                clearTimeout(silenceTimer);
+                setSilenceTimer(null);
+              }
+            } else if (!silenceTimer && audioChunks.length > 0) {
+              // If silence detected and timer not already set
+              const timer = setTimeout(() => {
+                // Process audio after silence
+                if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+                  mediaRecorderRef.current.stop();
+                  setTimeout(() => {
+                    processAudio(audioChunks);
+                    setAudioChunks([]);
+                    
+                    // Restart recording
+                    if (isListening && mediaRecorderRef.current) {
+                      mediaRecorderRef.current.start(500);
+                    }
+                  }, 500);
+                }
+              }, 1500); // 1.5 seconds of silence before processing
+              
+              setSilenceTimer(timer);
+            }
+            
+            if (isListening) {
+              requestAnimationFrame(checkSoundLevel);
+            }
+          };
           
-          if (isListening) {
-            requestAnimationFrame(checkSoundLevel);
-          }
-        };
-        
-        requestAnimationFrame(checkSoundLevel);
-      })
-      .catch((error) => {
-        console.error("Error accessing microphone:", error);
-        toast.error("Failed to access your microphone. Please check permissions.");
+          requestAnimationFrame(checkSoundLevel);
+        } else {
+          // Fallback: Use a simple timeout to process audio every 5 seconds
+          const processInterval = setInterval(() => {
+            if (!isListening) {
+              clearInterval(processInterval);
+              return;
+            }
+            
+            if (audioChunks.length > 0) {
+              mediaRecorderRef.current?.stop();
+              setTimeout(() => {
+                processAudio(audioChunks);
+                setAudioChunks([]);
+                
+                // Restart recording
+                if (isListening && mediaRecorderRef.current) {
+                  mediaRecorderRef.current.start(500);
+                }
+              }, 500);
+            }
+          }, 5000);
+        }
+      } catch (err) {
+        console.error("Failed to create MediaRecorder:", err);
+        toast.error("Failed to start recording. Please check your browser permissions.");
         setIsListening(false);
-      });
-  }, [isBrowser, isListening, audioChunks, silenceTimer, processAudio]);
+        return;
+      }
+    } catch (error) {
+      console.error("Error accessing microphone:", error);
+      toast.error("Failed to access your microphone. Please check permissions.");
+      setIsListening(false);
+    }
+  }, [isBrowser, browserSupport, isListening, audioChunks, silenceTimer, processAudio]);
   
   // Stop auto listening mode
   const stopAutoListening = useCallback(() => {
@@ -251,7 +319,11 @@ export function AudioControl({
     
     // Stop the media recorder
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-      mediaRecorderRef.current.stop();
+      try {
+        mediaRecorderRef.current.stop();
+      } catch (e) {
+        console.warn("Error stopping media recorder:", e);
+      }
     }
     
     // Process any remaining audio
@@ -264,28 +336,44 @@ export function AudioControl({
     
     // Close audio context
     if (audioContextRef.current) {
-      audioContextRef.current.close().catch(console.error);
+      try {
+        audioContextRef.current.close().catch(console.error);
+      } catch (e) {
+        console.warn("Error closing audio context:", e);
+      }
       audioContextRef.current = null;
       analyserRef.current = null;
     }
     
     // Release microphone
     if (mediaRecorderRef.current) {
-      const tracks = mediaRecorderRef.current.stream.getTracks();
-      tracks.forEach((track) => track.stop());
+      try {
+        const tracks = mediaRecorderRef.current.stream.getTracks();
+        tracks.forEach((track) => track.stop());
+      } catch (e) {
+        console.warn("Error stopping media tracks:", e);
+      }
       mediaRecorderRef.current = null;
     }
   }, [isBrowser, silenceTimer, audioChunks, processAudio]);
   
   // Functions for manual recording mode
-  const startManualRecording = useCallback(() => {
+  const startManualRecording = useCallback(async () => {
     if (!isBrowser) return;
     
     setManualStatus("recording");
     setManualChunks([]);
     
-    navigator.mediaDevices.getUserMedia({ audio: true })
-      .then((stream) => {
+    if (!browserSupport) {
+      toast.error("Audio recording is not supported in this browser. Please try Chrome, Firefox, or Edge.");
+      setManualStatus("idle");
+      return;
+    }
+    
+    try {
+      const stream = await safeGetUserMedia({ audio: true });
+      
+      try {
         const recorder = new MediaRecorder(stream);
         setManualRecorder(recorder);
         
@@ -295,43 +383,68 @@ export function AudioControl({
           }
         };
         
-        recorder.start(500);
-      })
-      .catch((error) => {
-        console.error("Error accessing microphone:", error);
-        toast.error("Failed to access your microphone. Please check permissions.");
+        recorder.start();
+      } catch (err) {
+        console.error("Failed to create MediaRecorder:", err);
+        toast.error("Failed to start recording. Your browser may not support this feature.");
         setManualStatus("idle");
-      });
-  }, [isBrowser]);
+        
+        // Clean up stream
+        stream.getTracks().forEach(track => track.stop());
+      }
+    } catch (error) {
+      console.error("Error accessing microphone:", error);
+      toast.error("Failed to access your microphone. Please check permissions.");
+      setManualStatus("idle");
+    }
+  }, [isBrowser, browserSupport]);
   
   const stopManualRecording = useCallback(() => {
     if (!isBrowser || !manualRecorder) return;
     
     setManualStatus("processing");
     
-    manualRecorder.stop();
-    
-    // Release microphone
-    const tracks = manualRecorder.stream.getTracks();
-    tracks.forEach((track) => track.stop());
-    
-    // Process the recorded audio
-    if (manualChunks.length > 0) {
-      processAudio(manualChunks).then(() => {
+    try {
+      manualRecorder.stop();
+      
+      // Release microphone
+      try {
+        const tracks = manualRecorder.stream.getTracks();
+        tracks.forEach((track) => track.stop());
+      } catch (e) {
+        console.warn("Error stopping media tracks:", e);
+      }
+      
+      // Process the recorded audio
+      if (manualChunks.length > 0) {
+        processAudio(manualChunks).then(() => {
+          setManualStatus("idle");
+        });
+      } else {
         setManualStatus("idle");
-      });
-    } else {
+      }
+    } catch (e) {
+      console.warn("Error in stopManualRecording:", e);
       setManualStatus("idle");
     }
   }, [isBrowser, manualRecorder, manualChunks, processAudio]);
   
-  // If we're not in a browser, render a simplified button
-  if (!isBrowser) {
+  // If not in browser or browser doesn't support audio, show fallback input
+  if (!isBrowser || !browserSupport) {
     return (
-      <Button disabled className="w-[180px]">
-        <Mic className="mr-2 h-4 w-4" />
-        Loading...
-      </Button>
+      <div className="w-full">
+        {!isBrowser ? (
+          <Button disabled className="w-[180px]">
+            <Mic className="mr-2 h-4 w-4" />
+            Loading...
+          </Button>
+        ) : (
+          <FallbackInput 
+            onSubmit={onTranscriptionComplete} 
+            isDisabled={isProcessing}
+          />
+        )}
+      </div>
     );
   }
   

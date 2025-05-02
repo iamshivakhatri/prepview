@@ -12,4 +12,6 @@ export { ContextPanel } from './context-panel';
 export { ConversationStream } from './conversation-stream';
 export { InterviewRoom } from './interview-room';
 export { ThemeToggle } from './theme-toggle';
-export { ThemeProvider } from './theme-provider'; 
+export { ThemeProvider } from './theme-provider';
+export { TechnicalVisualizer } from './technical-visualizer';
+export { FallbackInput } from './fallback-input'; 

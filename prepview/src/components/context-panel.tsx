@@ -13,9 +13,10 @@ import { motion, AnimatePresence } from "framer-motion";
 interface ContextPanelProps {
   onResumeUpdate: (text: string) => void;
   onJobDescriptionUpdate: (text: string) => void;
+  expanded?: boolean;
 }
 
-export function ContextPanel({ onResumeUpdate, onJobDescriptionUpdate }: ContextPanelProps) {
+export function ContextPanel({ onResumeUpdate, onJobDescriptionUpdate, expanded = true }: ContextPanelProps) {
   const [resumeText, setResumeText] = useState("");
   const [jobDescription, setJobDescription] = useState("");
   const [isUploading, setIsUploading] = useState(false);

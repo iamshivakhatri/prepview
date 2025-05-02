@@ -1,11 +1,10 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import { v4 as uuidv4 } from "uuid";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { Menu, UserCircle, DownloadIcon, MinusSquare, PlusSquare } from "lucide-react";
+import { Menu, UserCircle, DownloadIcon, MinusSquare, PlusSquare, Settings } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { AudioControl } from "@/components";
 import { ConversationStream, type Message } from "@/components/conversation-stream";
@@ -13,6 +12,14 @@ import { ContextPanel } from "@/components/context-panel";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
+import { 
+  DropdownMenu, 
+  DropdownMenuContent, 
+  DropdownMenuItem, 
+  DropdownMenuTrigger 
+} from "@/components/ui/dropdown-menu";
+import { AIProvider, DEFAULT_PROVIDER, PROVIDER_SETTINGS } from "@/lib/ai-config";
+import { getRandomUUID } from "@/lib/crypto-polyfill";
 
 export function InterviewRoom() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -24,11 +31,13 @@ export function InterviewRoom() {
   const [autoMode, setAutoMode] = useState(true);
   const [contextPanelExpanded, setContextPanelExpanded] = useState(true);
   const [userName, setUserName] = useState("User");
+  const [aiProvider, setAiProvider] = useState<AIProvider>(DEFAULT_PROVIDER);
 
   // Load data from local storage on component mount
   useEffect(() => {
     const storedResume = localStorage.getItem('resume');
     const storedJobDescription = localStorage.getItem('jobDescription');
+    const storedAiProvider = localStorage.getItem('aiProvider') as AIProvider | null;
     
     if (storedResume) {
       setResume(storedResume);
@@ -38,7 +47,22 @@ export function InterviewRoom() {
     if (storedJobDescription) {
       setJobDescription(storedJobDescription);
     }
+    
+    if (storedAiProvider) {
+      setAiProvider(storedAiProvider);
+    }
   }, []);
+
+  // Save AI provider preference to localStorage
+  useEffect(() => {
+    localStorage.setItem('aiProvider', aiProvider);
+  }, [aiProvider]);
+
+  // Handle AI provider change
+  const handleAiProviderChange = (provider: AIProvider) => {
+    setAiProvider(provider);
+    toast.success(`Transcription provider changed to ${PROVIDER_SETTINGS[provider].name}`);
+  };
 
   // Extract user name from resume
   const extractUserName = useCallback((text: string) => {
@@ -70,7 +94,7 @@ export function InterviewRoom() {
   const handleTranscriptionComplete = useCallback(async (text: string) => {
     // Add the interviewer's question to the conversation
     const newMessage: Message = {
-      id: uuidv4(),
+      id: getRandomUUID(),
       role: "interviewer",
       content: text,
       timestamp: new Date(),
@@ -137,7 +161,7 @@ export function InterviewRoom() {
       // Add the AI response to the conversation after a small delay
       setTimeout(() => {
         const aiMessage: Message = {
-          id: uuidv4(),
+          id: getRandomUUID(),
           role: "assistant",
           content: data.text,
           timestamp: new Date(),
@@ -237,7 +261,6 @@ export function InterviewRoom() {
           <div className="flex items-center mr-2">
             <div className="flex items-center gap-2">
               <Avatar className="h-8 w-8">
-                <AvatarImage src="/user-avatar.png" alt={userName} />
                 <AvatarFallback className="bg-primary text-primary-foreground">
                   {getUserInitials()}
                 </AvatarFallback>
@@ -268,93 +291,59 @@ export function InterviewRoom() {
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
         {/* Context panel (hidden on mobile) */}
-        <AnimatePresence initial={false}>
-          {contextPanelExpanded ? (
-            <motion.div
-              key="expanded"
-              initial={{ width: 0 }}
-              animate={{ width: "300px" }}
-              exit={{ width: 0 }}
-              transition={{ duration: 0.3, ease: "easeInOut" }}
-              className="hidden lg:block border-r relative overflow-hidden"
-            >
-              <Button 
-                variant="ghost" 
-                size="icon" 
-                className="absolute top-2 right-2 z-10" 
-                onClick={() => setContextPanelExpanded(false)}
-              >
-                <MinusSquare className="h-4 w-4" />
-              </Button>
-              
-              <div className="h-full p-4 w-[300px]">
-                <ContextPanel 
-                  onResumeUpdate={handleResumeUpdate}
-                  onJobDescriptionUpdate={handleJobDescriptionUpdate}
-                />
-              </div>
-            </motion.div>
-          ) : (
-            <motion.div 
-              key="collapsed"
-              initial={{ width: 0 }}
-              animate={{ width: "40px" }}
-              exit={{ width: 0 }}
-              transition={{ duration: 0.3, ease: "easeInOut" }}
-              className="hidden lg:flex h-full flex-col items-center justify-center border-r cursor-pointer"
-              onClick={() => setContextPanelExpanded(true)}
-            >
-              <Button
-                variant="ghost"
-                size="icon"
-                className="mb-2"
-              >
-                <PlusSquare className="h-4 w-4" />
-              </Button>
-              <span className="text-xs font-medium transform -rotate-90 whitespace-nowrap">
-                Context Panel
-              </span>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        <div className="hidden lg:block w-[300px] border-r overflow-y-auto">
+          <ContextPanel 
+            onResumeUpdate={handleResumeUpdate}
+            onJobDescriptionUpdate={handleJobDescriptionUpdate}
+            expanded={contextPanelExpanded}
+          />
+        </div>
         
         {/* Main conversation area */}
-        <div className="flex flex-col flex-1">
-          {isProcessing && (
-            <div className="px-4 py-2">
-              <Progress value={progress} className="h-1" />
-            </div>
-          )}
-          
-          <div className="flex-1 overflow-hidden">
-            {messages.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full space-y-4 p-4">
-                <h2 className="text-xl font-semibold">Welcome to PrepView</h2>
-                <p className="text-center text-muted-foreground max-w-md">
-                  {resume ? 
-                    `Ready for your interview, ${userName}. ${autoMode ? 
-                      "Click Start Listening to begin auto-detection of interviewer questions." : 
-                      "Use the microphone to record interviewer questions."}`
-                    : 
-                    "Upload your resume to start practicing for your interview. The AI will generate responses based on your experience."}
-                </p>
+        <div className="flex-1 flex flex-col min-w-0">
+          {/* Conversation */}
+          <div className="flex-1 overflow-y-auto p-4" id="conversation-container">
+            {isProcessing && (
+              <div className="px-4 py-2">
+                <Progress value={progress} className="h-1" />
               </div>
-            ) : (
-                <>
-                
-              <ConversationStream messages={messages} isTyping={isTyping} />
-             
-              </>
             )}
-          </div>
-          
-          {/* Audio control for both modes */}
-          <div className="p-4 border-t flex justify-center">
-            <AudioControl 
-              onTranscriptionComplete={handleTranscriptionComplete}
-              isProcessing={isProcessing}
-              autoMode={autoMode}
-            />
+            
+            <div className="flex-1 overflow-hidden">
+              {messages.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full space-y-4 p-4">
+                  <h2 className="text-xl font-semibold">Welcome to PrepView</h2>
+                  <p className="text-center text-muted-foreground max-w-md">
+                    {resume ? 
+                      `Ready for your interview, ${userName}. ${autoMode ? 
+                        "Click Start Listening to begin auto-detection of interviewer questions." : 
+                        "Use the microphone to record interviewer questions."}`
+                      : 
+                      "Upload your resume to start practicing for your interview. The AI will generate responses based on your experience."}
+                  </p>
+                </div>
+              ) : (
+                <ConversationStream messages={messages} isTyping={isTyping} />
+              )}
+            </div>
+            
+            {/* Audio control for both modes */}
+            <div className="border-t p-4">
+              {isProcessing && (
+                <div className="mb-2">
+                  <Progress value={progress} className="h-1" />
+                </div>
+              )}
+              
+              <div className="flex items-center">
+                <AudioControl
+                  onTranscriptionComplete={handleTranscriptionComplete}
+                  isProcessing={isProcessing || isTyping}
+                  autoMode={autoMode}
+                  aiProvider={aiProvider}
+                />
+              </div>
+            </div>
           </div>
         </div>
       </div>
